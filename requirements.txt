@@ -1,0 +1,5 @@
+discord.py
+anthropic
+requests
+python-dotenv
+aiosqlite

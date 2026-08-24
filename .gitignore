@@ -1,7 +1,15 @@
 .env
 __pycache__/
 *.pyc
+
+# Nexus 1.x JSON storage (kept locally as the migration source of truth)
 economy.json
 warnings.json
 config.json
 reminders.json
+
+# Nexus 2.0 SQLite storage
+nexus.db
+nexus.db-wal
+nexus.db-shm
+backups/

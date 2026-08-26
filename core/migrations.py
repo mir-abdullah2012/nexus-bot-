@@ -461,6 +461,42 @@ _EGG_ITEM_SQL = (
 )
 
 
+# ============================================================
+#  V5 -- MARKETPLACE
+# ============================================================
+# One table. The listing row IS the escrow -- a listed item is removed from the
+# seller's inventory and lives here until it sells, is cancelled, or expires.
+# Leaving it in inventory would let the seller equip it, salvage it for $RAM, or
+# relist it while it was still on the market.
+#
+# Rows with status='sold' double as the price history, so there is no separate
+# escrow, sales, or history table.
+_V5 = (
+    """
+    CREATE TABLE IF NOT EXISTS market_listings (
+        listing_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+        seller_id   INTEGER NOT NULL REFERENCES players(user_id) ON DELETE CASCADE,
+        item_code   TEXT    NOT NULL,
+        quantity    INTEGER NOT NULL DEFAULT 1,
+        price       INTEGER NOT NULL,
+        listed_at   INTEGER NOT NULL,
+        expires_at  INTEGER NOT NULL,
+        status      TEXT    NOT NULL DEFAULT 'active',
+        buyer_id    INTEGER,
+        sold_at     INTEGER,
+        fee_paid    INTEGER NOT NULL DEFAULT 0,
+        tax_paid    INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_market_active "
+    "ON market_listings(status, expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_market_seller "
+    "ON market_listings(seller_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_market_item "
+    "ON market_listings(item_code, status)",
+)
+
+
 # Seed the shop with exactly the Nexus 1.x catalogue and prices.
 # sort_order preserves the original dict ordering so !shop renders identically.
 SHOP_SEED = [
@@ -620,6 +656,7 @@ MIGRATIONS = [
     (2, "rpg_core", _V2),
     (3, "pvp_clans", _V3),
     (4, "pets", _V4),
+    (5, "marketplace", _V5),
 ]
 
 # (version, sql, list_of_param_tuples) -- parameterised seed data per version.

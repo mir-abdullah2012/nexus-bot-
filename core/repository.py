@@ -13,8 +13,8 @@ import json
 import time
 
 from core.models import (
-    Clan, ClanMember, DuelStats, Dungeon, GearItem, GuildConfig, Pet, PetSpecies,
-    Player, PlayerClass, Reminder, ShopItem, Warning,
+    Clan, ClanMember, DuelStats, Dungeon, GearItem, GuildConfig, Listing, Pet,
+    PetSpecies, Player, PlayerClass, Reminder, ShopItem, Warning,
 )
 
 
@@ -1005,6 +1005,278 @@ class Repository:
         )
         pet.xp, pet.level = xp, level
         return pet, levelled, level
+
+    # ========================================================
+    #  PHASE 5 -- MARKETPLACE
+    # ========================================================
+    _LISTING_SELECT = (
+        "SELECT l.*, s.display_name, s.category FROM market_listings l "
+        "LEFT JOIN shop_items s ON s.code = l.item_code"
+    )
+
+    async def _apply_balance(self, conn, user_id, delta, reason, related_id, now):
+        """Balance move + economy_log entry, INSIDE an open transaction.
+
+        The public adjust_balance() opens its own transaction, so it cannot be
+        used from within one. This is the same logic for callers that are
+        already holding the connection.
+        """
+        await conn.execute(
+            "UPDATE players SET balance = MAX(0, balance + ?), updated_at = ? "
+            "WHERE user_id = ?",
+            (delta, now, user_id),
+        )
+        async with conn.execute(
+            "SELECT balance FROM players WHERE user_id = ?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        balance = row["balance"]
+        await conn.execute(
+            "INSERT INTO economy_log "
+            "(user_id, delta, reason, related_id, balance_after, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, delta, reason, related_id, balance, now),
+        )
+        return balance
+
+    async def _deliver_item(self, conn, user_id, item_code, quantity, stackable,
+                            salvage_value, reason, now):
+        """Hand an item to a player inside a transaction.
+
+        Non-stackable gear the player already owns would hit
+        ON CONFLICT DO NOTHING and vanish, so it is salvaged to $RAM instead --
+        the same rule Phase 2 uses for duplicate dungeon drops. Returns
+        ('item', qty) or ('salvage', ram).
+        """
+        if stackable:
+            await conn.execute(
+                "INSERT INTO inventory (user_id, item_code, quantity, acquired_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(user_id, item_code) "
+                "DO UPDATE SET quantity = quantity + excluded.quantity",
+                (user_id, item_code, quantity, now),
+            )
+            return "item", quantity
+
+        async with conn.execute(
+            "SELECT 1 FROM inventory WHERE user_id = ? AND item_code = ?",
+            (user_id, item_code),
+        ) as cur:
+            already_owned = await cur.fetchone()
+
+        if already_owned:
+            await self._apply_balance(conn, user_id, salvage_value, reason, None, now)
+            return "salvage", salvage_value
+
+        await conn.execute(
+            "INSERT INTO inventory (user_id, item_code, quantity, acquired_at) "
+            "VALUES (?, ?, 1, ?)",
+            (user_id, item_code, now),
+        )
+        return "item", 1
+
+    async def _salvage_value(self, item_code: str) -> int:
+        return await self.db.fetchval(
+            "SELECT salvage_value FROM gear_stats WHERE item_code = ?",
+            (item_code,), default=0,
+        ) or 0
+
+    async def count_active_listings(self, seller_id: int | None = None) -> int:
+        if seller_id is None:
+            return await self.db.fetchval(
+                "SELECT COUNT(*) FROM market_listings WHERE status = 'active'",
+                default=0,
+            )
+        return await self.db.fetchval(
+            "SELECT COUNT(*) FROM market_listings "
+            "WHERE status = 'active' AND seller_id = ?",
+            (seller_id,), default=0,
+        )
+
+    async def get_listing(self, listing_id: int):
+        row = await self.db.fetchone(
+            f"{self._LISTING_SELECT} WHERE l.listing_id = ?", (listing_id,)
+        )
+        return Listing.from_row(row) if row else None
+
+    async def browse_listings(self, offset: int, limit: int) -> list:
+        rows = await self.db.fetchall(
+            f"{self._LISTING_SELECT} WHERE l.status = 'active' "
+            "ORDER BY l.listed_at DESC, l.listing_id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+        return [Listing.from_row(r) for r in rows]
+
+    async def seller_listings(self, seller_id: int) -> list:
+        rows = await self.db.fetchall(
+            f"{self._LISTING_SELECT} WHERE l.seller_id = ? AND l.status = 'active' "
+            "ORDER BY l.expires_at ASC",
+            (seller_id,),
+        )
+        return [Listing.from_row(r) for r in rows]
+
+    async def find_listings(self, query: str, limit: int) -> list:
+        """Match an exact item code or a whole category."""
+        q = query.strip()
+        rows = await self.db.fetchall(
+            f"{self._LISTING_SELECT} WHERE l.status = 'active' AND "
+            "(l.item_code = ? COLLATE NOCASE OR s.category = ? COLLATE NOCASE) "
+            "ORDER BY l.price ASC LIMIT ?",
+            (q, q, limit),
+        )
+        return [Listing.from_row(r) for r in rows]
+
+    async def create_listing(self, seller_id, item_code, quantity, price, fee,
+                             expires_at, stackable) -> int | None:
+        """Escrow the item, charge the fee, open the listing. Atomic.
+
+        Returns the listing id, or None if the seller no longer holds the item
+        (re-checked inside the transaction so it cannot be raced).
+        """
+        now = _now()
+        async with self.db.transaction() as conn:
+            async with conn.execute(
+                "SELECT quantity FROM inventory WHERE user_id = ? AND item_code = ?",
+                (seller_id, item_code),
+            ) as cur:
+                row = await cur.fetchone()
+            if row is None or row["quantity"] < quantity:
+                return None
+
+            # Remove from inventory -- the listing now holds it.
+            if row["quantity"] == quantity:
+                await conn.execute(
+                    "DELETE FROM inventory WHERE user_id = ? AND item_code = ?",
+                    (seller_id, item_code),
+                )
+            else:
+                await conn.execute(
+                    "UPDATE inventory SET quantity = quantity - ? "
+                    "WHERE user_id = ? AND item_code = ?",
+                    (quantity, seller_id, item_code),
+                )
+
+            await self._apply_balance(
+                conn, seller_id, -fee, f"market:fee:{item_code}", None, now
+            )
+            cur = await conn.execute(
+                "INSERT INTO market_listings "
+                "(seller_id, item_code, quantity, price, listed_at, expires_at, "
+                " status, fee_paid) VALUES (?, ?, ?, ?, ?, ?, 'active', ?)",
+                (seller_id, item_code, quantity, price, now, expires_at, fee),
+            )
+            return cur.lastrowid
+
+    async def buy_listing(self, listing_id: int, buyer_id: int,
+                          tax_rate: float = 0.0) -> dict:
+        """Complete a sale. Atomic, and safe against two buyers racing.
+
+        The status flip is a compare-and-swap: UPDATE ... WHERE status='active'.
+        Whichever transaction gets there first wins, the other sees rowcount 0.
+        """
+        listing = await self.get_listing(listing_id)
+        if listing is None or listing.status != "active":
+            return {"ok": False, "reason": "gone"}
+        if listing.seller_id == buyer_id:
+            return {"ok": False, "reason": "own"}
+
+        stackable = await self.is_stackable(listing.item_code)
+        if not stackable:
+            owned = await self.db.fetchval(
+                "SELECT 1 FROM inventory WHERE user_id = ? AND item_code = ?",
+                (buyer_id, listing.item_code),
+            )
+            if owned:
+                # Blocked rather than auto-salvaged: paying market price to
+                # receive salvage value is a loss the buyer never agreed to.
+                return {"ok": False, "reason": "duplicate"}
+
+        await self.ensure_player(buyer_id)
+        balance = await self.get_balance(buyer_id)
+        if balance < listing.price:
+            return {"ok": False, "reason": "funds", "short": listing.price - balance}
+
+        tax = int(listing.price * tax_rate)
+        net = listing.price - tax
+        now = _now()
+
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "UPDATE market_listings SET status = 'sold', buyer_id = ?, "
+                "sold_at = ?, tax_paid = ? "
+                "WHERE listing_id = ? AND status = 'active'",
+                (buyer_id, now, tax, listing_id),
+            )
+            if cur.rowcount == 0:
+                return {"ok": False, "reason": "gone"}
+
+            await self._apply_balance(
+                conn, buyer_id, -listing.price,
+                f"market:purchase:{listing.item_code}", listing.seller_id, now,
+            )
+            await self._apply_balance(
+                conn, listing.seller_id, net,
+                f"market:sale:{listing.item_code}", buyer_id, now,
+            )
+            outcome, amount = await self._deliver_item(
+                conn, buyer_id, listing.item_code, listing.quantity, stackable,
+                0, "market:unused", now,
+            )
+
+        return {"ok": True, "listing": listing, "paid": listing.price,
+                "tax": tax, "seller_net": net, "outcome": outcome, "amount": amount}
+
+    async def cancel_listing(self, listing_id: int, seller_id: int) -> dict:
+        listing = await self.get_listing(listing_id)
+        if listing is None or listing.status != "active":
+            return {"ok": False, "reason": "gone"}
+        if listing.seller_id != seller_id:
+            return {"ok": False, "reason": "not_yours"}
+
+        stackable = await self.is_stackable(listing.item_code)
+        salvage = await self._salvage_value(listing.item_code)
+        now = _now()
+
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "UPDATE market_listings SET status = 'cancelled' "
+                "WHERE listing_id = ? AND status = 'active'",
+                (listing_id,),
+            )
+            if cur.rowcount == 0:
+                return {"ok": False, "reason": "gone"}
+            outcome, amount = await self._deliver_item(
+                conn, seller_id, listing.item_code, listing.quantity, stackable,
+                salvage, f"market:return-salvage:{listing.item_code}", now,
+            )
+        return {"ok": True, "listing": listing, "outcome": outcome, "amount": amount}
+
+    async def expire_listings(self, now: int) -> list:
+        """Sweep listings past their expiry, returning each item to its seller."""
+        rows = await self.db.fetchall(
+            "SELECT * FROM market_listings "
+            "WHERE status = 'active' AND expires_at <= ?",
+            (now,),
+        )
+        results = []
+        for row in rows:
+            listing = Listing.from_row(row)
+            stackable = await self.is_stackable(listing.item_code)
+            salvage = await self._salvage_value(listing.item_code)
+            async with self.db.transaction() as conn:
+                cur = await conn.execute(
+                    "UPDATE market_listings SET status = 'expired' "
+                    "WHERE listing_id = ? AND status = 'active'",
+                    (listing.listing_id,),
+                )
+                if cur.rowcount == 0:
+                    continue
+                outcome, amount = await self._deliver_item(
+                    conn, listing.seller_id, listing.item_code, listing.quantity,
+                    stackable, salvage,
+                    f"market:return-salvage:{listing.item_code}", now,
+                )
+            results.append({"listing": listing, "outcome": outcome, "amount": amount})
+        return results
 
     async def top_duelists(self, limit: int) -> list:
         rows = await self.db.fetchall(

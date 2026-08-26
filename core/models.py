@@ -225,6 +225,59 @@ class GearItem:
 
 
 # ============================================================
+#  PHASE 5 -- MARKETPLACE
+# ============================================================
+@dataclass
+class Listing:
+    """A marketplace listing. While status is 'active' this row holds the item --
+    it has been removed from the seller's inventory."""
+
+    listing_id: int
+    seller_id: int
+    item_code: str
+    quantity: int = 1
+    price: int = 0
+    listed_at: int = 0
+    expires_at: int = 0
+    status: str = "active"
+    buyer_id: int | None = None
+    sold_at: int | None = None
+    fee_paid: int = 0
+    tax_paid: int = 0
+    # joined from shop_items when available
+    display_name: str | None = None
+    category: str | None = None
+
+    @classmethod
+    def from_row(cls, row):
+        keys = row.keys()
+        return cls(
+            listing_id=row["listing_id"],
+            seller_id=row["seller_id"],
+            item_code=row["item_code"],
+            quantity=row["quantity"],
+            price=row["price"],
+            listed_at=row["listed_at"],
+            expires_at=row["expires_at"],
+            status=row["status"],
+            buyer_id=row["buyer_id"],
+            sold_at=row["sold_at"],
+            fee_paid=row["fee_paid"],
+            tax_paid=row["tax_paid"],
+            display_name=row["display_name"] if "display_name" in keys else None,
+            category=row["category"] if "category" in keys else None,
+        )
+
+    @property
+    def name(self) -> str:
+        return self.display_name or self.item_code
+
+    @property
+    def unit_price(self) -> int:
+        return self.price // self.quantity if self.quantity else self.price
+
+
+# ============================================================
 #  PHASE 4 -- PETS
 # ============================================================
 @dataclass

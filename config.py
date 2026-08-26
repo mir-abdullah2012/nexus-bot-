@@ -118,6 +118,35 @@ WEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
 WEATHER_TIMEOUT = 10
 
 # ============================================================
+#  MARKETPLACE (Phase 5)
+# ============================================================
+# The fees exist less for anti-abuse than for the economy. Every other $RAM flow
+# -- mine, daily, dungeons, levelups, salvage -- prints or shuffles currency.
+# The only real sink is the shop, and the shop is a FINITE catalogue: once a
+# player owns all 21 items, nothing removes $RAM from the game again. Market
+# tax is the first ongoing sink, so it is set on the firm side deliberately.
+MARKET_LISTING_FEE_RATE = 0.02      # charged at listing, never refunded
+MARKET_LISTING_FEE_MIN = 50
+MARKET_SALE_TAX_RATE = 0.08         # taken from the seller's proceeds on a sale
+
+MARKET_MAX_ACTIVE_LISTINGS = 8      # a cap beats a cooldown: bounds spam without
+                                    # punishing someone selling several things
+MARKET_LISTING_DAYS = 7
+MARKET_MIN_PRICE = 50
+MARKET_MAX_PRICE = 10_000_000
+MARKET_PAGE_SIZE = 8
+MARKET_SWEEP_MINUTES = 5            # how often expired listings are swept back
+
+
+def market_listing_fee(price: int) -> int:
+    return max(MARKET_LISTING_FEE_MIN, int(price * MARKET_LISTING_FEE_RATE))
+
+
+def market_sale_tax(price: int) -> int:
+    return int(price * MARKET_SALE_TAX_RATE)
+
+
+# ============================================================
 #  PETS (Phase 4)
 # ============================================================
 # An egg is just a shop_items row, so buying and dropping one needs no new

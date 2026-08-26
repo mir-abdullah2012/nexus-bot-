@@ -177,6 +177,11 @@ class Utility(commands.Cog):
             "`!guild leave` `!guild kick/promote/demote @user`\n"
             "`!guild war` — 7-day guild standings"
         ), inline=False)
+        embed.add_field(name="🏪 Market", value=(
+            "`!market [page]` — browse player listings\n"
+            "`!market sell <item> <price>` `!market buy <id>`\n"
+            "`!market mine` `!market cancel <id>` `!market find <item|category>`"
+        ), inline=False)
         embed.add_field(name="🐾 Pets", value=(
             "`buy EGG` — 3,000GB, or find one in a dungeon\n"
             "`!pet hatch` `!pet list` `!pet active <id>`\n"

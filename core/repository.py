@@ -13,8 +13,8 @@ import json
 import time
 
 from core.models import (
-    Clan, ClanMember, DuelStats, Dungeon, GearItem, GuildConfig, Player, PlayerClass,
-    Reminder, ShopItem, Warning,
+    Clan, ClanMember, DuelStats, Dungeon, GearItem, GuildConfig, Pet, PetSpecies,
+    Player, PlayerClass, Reminder, ShopItem, Warning,
 )
 
 
@@ -175,15 +175,62 @@ class Repository:
         )
         return [r["item_code"] for r in rows]
 
-    async def add_item(self, user_id: int, item_code: str, quantity: int = 1) -> None:
-        """Add an item. Nexus 1.x stored one of each, so a repeat buy is a no-op."""
+    async def add_item(self, user_id: int, item_code: str, quantity: int = 1,
+                       stackable: bool = False) -> None:
+        """Add an item.
+
+        Gear is one-of-a-kind, exactly as Nexus 1.x behaved, so a repeat is a
+        no-op. Stackable items (eggs) increment the quantity column instead --
+        it has existed since v1 but nothing ever used it.
+        """
         await self.ensure_player(user_id)
+        conflict = (
+            "DO UPDATE SET quantity = quantity + excluded.quantity"
+            if stackable else "DO NOTHING"
+        )
         await self.db.execute(
             "INSERT INTO inventory (user_id, item_code, quantity, acquired_at) "
-            "VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(user_id, item_code) DO NOTHING",
+            f"VALUES (?, ?, ?, ?) ON CONFLICT(user_id, item_code) {conflict}",
             (user_id, item_code, quantity, _now()),
         )
+
+    async def is_stackable(self, item_code: str) -> bool:
+        return bool(await self.db.fetchval(
+            "SELECT stackable FROM shop_items WHERE code = ?", (item_code,), default=0
+        ))
+
+    async def get_item_quantity(self, user_id: int, item_code: str) -> int:
+        return await self.db.fetchval(
+            "SELECT quantity FROM inventory WHERE user_id = ? AND item_code = ?",
+            (user_id, item_code), default=0,
+        ) or 0
+
+    async def get_inventory_counts(self, user_id: int) -> list:
+        """[(item_code, quantity)] in acquisition order, for !inventory."""
+        rows = await self.db.fetchall(
+            "SELECT item_code, quantity FROM inventory WHERE user_id = ? "
+            "ORDER BY acquired_at ASC, id ASC",
+            (user_id,),
+        )
+        return [(r["item_code"], r["quantity"]) for r in rows]
+
+    async def consume_item(self, user_id: int, item_code: str, amount: int = 1) -> bool:
+        """Spend a stackable item. Removes the row when the stack empties."""
+        have = await self.get_item_quantity(user_id, item_code)
+        if have < amount:
+            return False
+        if have == amount:
+            await self.db.execute(
+                "DELETE FROM inventory WHERE user_id = ? AND item_code = ?",
+                (user_id, item_code),
+            )
+        else:
+            await self.db.execute(
+                "UPDATE inventory SET quantity = quantity - ? "
+                "WHERE user_id = ? AND item_code = ?",
+                (amount, user_id, item_code),
+            )
+        return True
 
     async def has_item(self, user_id: int, item_code: str) -> bool:
         found = await self.db.fetchval(
@@ -817,6 +864,147 @@ class Repository:
             (challenger_id, opponent_id, winner_id, wager, len(result.rounds),
              result.a_hp, result.b_hp, rating_change, _now()),
         )
+
+    # ========================================================
+    #  PHASE 4 -- PETS
+    # ========================================================
+    _PET_SELECT = (
+        "SELECT p.*, s.name AS species_name, s.emoji, s.description, s.rarity, "
+        "       s.base_power, s.base_thermals, s.base_clock, s.base_bandwidth, "
+        "       s.hatch_weight, s.sort_order "
+        "FROM pets p JOIN pet_species s ON s.species_id = p.species_id"
+    )
+
+    async def get_species_list(self) -> list:
+        rows = await self.db.fetchall(
+            "SELECT * FROM pet_species WHERE enabled = 1 ORDER BY sort_order ASC"
+        )
+        return [PetSpecies.from_row(r) for r in rows]
+
+    async def get_species(self, species_id: str):
+        row = await self.db.fetchone(
+            "SELECT * FROM pet_species WHERE species_id = ?", (species_id,)
+        )
+        return PetSpecies.from_row(row) if row else None
+
+    async def get_pet(self, pet_id: int):
+        row = await self.db.fetchone(
+            f"{self._PET_SELECT} WHERE p.pet_id = ? AND p.released_at IS NULL",
+            (pet_id,),
+        )
+        return Pet.from_row(row) if row else None
+
+    async def get_pets(self, user_id: int) -> list:
+        rows = await self.db.fetchall(
+            f"{self._PET_SELECT} WHERE p.user_id = ? AND p.released_at IS NULL "
+            "ORDER BY p.level DESC, p.pet_id ASC",
+            (user_id,),
+        )
+        return [Pet.from_row(r) for r in rows]
+
+    async def count_pets(self, user_id: int) -> int:
+        return await self.db.fetchval(
+            "SELECT COUNT(*) FROM pets WHERE user_id = ? AND released_at IS NULL",
+            (user_id,), default=0,
+        )
+
+    async def get_active_pet(self, user_id: int):
+        """The pet in players.pet_id -- the column reserved back in Phase 1."""
+        pet_id = await self.db.fetchval(
+            "SELECT pet_id FROM players WHERE user_id = ?", (user_id,)
+        )
+        if not pet_id:
+            return None
+        pet = await self.get_pet(pet_id)
+        if pet is None or pet.user_id != user_id:
+            # Released or reassigned out from under us -- clear the pointer.
+            await self.db.execute(
+                "UPDATE players SET pet_id = NULL WHERE user_id = ?", (user_id,)
+            )
+            return None
+        return pet
+
+    async def set_active_pet(self, user_id: int, pet_id: int | None) -> None:
+        await self.db.execute(
+            "UPDATE players SET pet_id = ?, updated_at = ? WHERE user_id = ?",
+            (pet_id, _now(), user_id),
+        )
+
+    async def hatch_pet(self, user_id: int, rng) -> Pet | None:
+        """Roll a species by hatch_weight and create the instance."""
+        rows = await self.db.fetchall(
+            "SELECT * FROM pet_species WHERE enabled = 1 AND hatch_weight > 0"
+        )
+        if not rows:
+            return None
+
+        total = sum(r["hatch_weight"] for r in rows)
+        target = rng.uniform(0, total)
+        running = 0.0
+        chosen = rows[-1]
+        for r in rows:
+            running += r["hatch_weight"]
+            if target <= running:
+                chosen = r
+                break
+
+        now = _now()
+        pet_id = await self.db.execute(
+            "INSERT INTO pets (user_id, species_id, level, xp, hatched_at) "
+            "VALUES (?, ?, 1, 0, ?)",
+            (user_id, chosen["species_id"], now),
+        )
+        return await self.get_pet(pet_id)
+
+    async def rename_pet(self, pet_id: int, name: str | None) -> None:
+        await self.db.execute("UPDATE pets SET name = ? WHERE pet_id = ?", (name, pet_id))
+
+    async def release_pet(self, pet_id: int, user_id: int) -> None:
+        """Soft delete, and clear the active pointer if this was the active pet."""
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                "UPDATE pets SET released_at = ? WHERE pet_id = ?", (_now(), pet_id)
+            )
+            await conn.execute(
+                "UPDATE players SET pet_id = NULL WHERE user_id = ? AND pet_id = ?",
+                (user_id, pet_id),
+            )
+
+    async def grant_pet_xp(self, user_id: int, player_xp: int, share: float,
+                           xp_for_level, max_level: int):
+        """Feed the ACTIVE pet a share of XP the player just earned.
+
+        Only the active pet gains anything -- that is what makes choosing one an
+        actual investment rather than a menu. Returns (pet, levelled, new_level)
+        or (None, False, 0) when there is no active pet.
+        """
+        pet = await self.get_active_pet(user_id)
+        if pet is None:
+            return None, False, 0
+
+        amount = int(player_xp * share)
+        if amount <= 0 or pet.level >= max_level:
+            return pet, False, pet.level
+
+        xp = pet.xp + amount
+        level = pet.level
+        levelled = False
+
+        # Loop rather than a single step: a big dungeon payout can legitimately
+        # carry a low-level pet through more than one level at once.
+        while level < max_level and xp >= xp_for_level(level):
+            xp -= xp_for_level(level)
+            level += 1
+            levelled = True
+
+        if level >= max_level:
+            xp = 0
+
+        await self.db.execute(
+            "UPDATE pets SET xp = ?, level = ? WHERE pet_id = ?", (xp, level, pet.pet_id)
+        )
+        pet.xp, pet.level = xp, level
+        return pet, levelled, level
 
     async def top_duelists(self, limit: int) -> list:
         rows = await self.db.fetchall(

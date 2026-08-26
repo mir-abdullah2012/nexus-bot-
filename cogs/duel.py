@@ -16,6 +16,7 @@ from discord.ext import commands
 
 import config
 from core import combat
+from core.loadout import build_loadout
 
 
 def human_duration(seconds: int) -> str:
@@ -53,10 +54,10 @@ class Duel(commands.Cog):
         return self.bot.repo
 
     async def _build_stats(self, user_id):
-        player = await self.repo.get_player(user_id)
-        klass = await self.repo.get_class(player.class_id) if player.class_id else None
-        equipped = await self.repo.get_equipped_map(user_id)
-        return player, klass, combat.compute_stats(player, klass, equipped.values())
+        """Full loadout, pets included. One shared path so duels and dungeons
+        can never disagree about someone's stats."""
+        lo = await build_loadout(self.repo, user_id)
+        return lo.player, lo.player_class, lo.stats
 
     # ========================================================
     #  CHALLENGE

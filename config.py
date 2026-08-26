@@ -118,6 +118,32 @@ WEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
 WEATHER_TIMEOUT = 10
 
 # ============================================================
+#  PETS (Phase 4)
+# ============================================================
+# An egg is just a shop_items row, so buying and dropping one needs no new
+# machinery at all -- it rides the existing !buy flow and dungeon loot tables.
+EGG_ITEM_CODE = "EGG"
+EGG_PRICE = 3_000
+
+PET_MAX_OWNED = 10
+PET_MAX_LEVEL = 25
+PET_XP_BASE = 40               # xp needed to leave level L = PET_XP_BASE * L
+PET_XP_SHARE = 0.25            # the ACTIVE pet earns this share of your XP
+PET_STAT_GROWTH = 0.08         # stat = base * (1 + (level - 1) * growth)
+PET_RAM_BONUS_PER_LEVEL = 0.004    # +0.4% $RAM per pet level, +10% at cap
+PET_NAME_MAX = 20
+
+# No feeding, no happiness decay, no daily care. Those systems punish you for
+# not logging in, which is the opposite of fun on a small server. The active pet
+# levels purely off activity you were doing anyway.
+
+
+def pet_xp_for_level(level: int) -> int:
+    """XP the active pet needs to advance out of `level`."""
+    return PET_XP_BASE * level
+
+
+# ============================================================
 #  CLANS (Phase 3)
 # ============================================================
 # The command is !guild because that is what players call it. The SCHEMA says
@@ -206,6 +232,7 @@ CATEGORY_LABELS = {
     "cpu": "🧠 AMD Ryzen CPUs",
     "cooler": "❄️ Cooling",
     "ram": "💾 Memory",
+    "egg": "🥚 Eggs",
 }
 RARITY_EMOJI = {
     "common": "⚪", "uncommon": "🟢", "rare": "🔵",

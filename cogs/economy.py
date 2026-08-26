@@ -13,6 +13,7 @@ from discord.ext import commands
 
 import config
 from core import combat
+from core.loadout import build_loadout, grant_pet_xp
 
 
 class Economy(commands.Cog):
@@ -42,15 +43,25 @@ class Economy(commands.Cog):
             config.xp_for_level,
             config.LEVEL_UP_BONUS_PER_LEVEL,
         )
-        if not levelled:
-            return
-        try:
-            await message.channel.send(
-                f"⬆️ **LEVEL UP!** {message.author.mention} is now **Level {new_level}**! "
-                f"Bonus: +{bonus}GB $RAM 💾"
-            )
-        except Exception:
-            pass
+
+        # The active pet earns a share of the same XP -- no separate grind.
+        pet, pet_levelled, _ = await grant_pet_xp(self.repo, message.author.id, amount)
+
+        if levelled:
+            try:
+                await message.channel.send(
+                    f"⬆️ **LEVEL UP!** {message.author.mention} is now "
+                    f"**Level {new_level}**! Bonus: +{bonus}GB $RAM 💾"
+                )
+            except Exception:
+                pass
+        if pet_levelled and pet is not None:
+            try:
+                await message.channel.send(
+                    f"🐾 **{pet.display_name}** reached **Level {pet.level}**!"
+                )
+            except Exception:
+                pass
 
     async def try_buy(self, message) -> bool:
         """Handle the prefix-less `buy <model>` shortcut.
@@ -78,6 +89,18 @@ class Economy(commands.Cog):
             return
 
         await self.repo.adjust_balance(message.author.id, -item.price, f"buy:{item.code}")
+
+        # Stackable consumables (eggs) accumulate and grant no role -- there is
+        # no "EGG" role to hand out, and buying a second one must not be a no-op.
+        if await self.repo.is_stackable(item.code):
+            await self.repo.add_item(message.author.id, item.code, 1, stackable=True)
+            held = await self.repo.get_item_quantity(message.author.id, item.code)
+            await message.channel.send(
+                f"🥚 Bought **{item.display_name}** — you now hold **{held}**. "
+                f"`!pet hatch` to open one."
+            )
+            return
+
         await self.repo.add_item(message.author.id, item.code)
 
         role_name = item.role_name or item.code
@@ -102,13 +125,13 @@ class Economy(commands.Cog):
     # ========================================================
     @commands.command()
     async def mine(self, ctx):
-        player = await self.repo.get_player(ctx.author.id)
+        lo = await build_loadout(self.repo, ctx.author.id)
         gain = int(
-            random.randint(config.MINE_MIN, config.MINE_MAX)
-            * combat.prestige_ram_multiplier(player.prestige)
+            random.randint(config.MINE_MIN, config.MINE_MAX) * lo.ram_multiplier
         )
         await self.repo.adjust_balance(ctx.author.id, gain, "mine")
-        await ctx.send(f"🛠️ +{gain}GB $RAM stored. Your PC is getting beefy.")
+        pet_note = f" {lo.pet.emoji}" if lo.pet else ""
+        await ctx.send(f"🛠️ +{gain}GB $RAM stored. Your PC is getting beefy.{pet_note}")
 
     @commands.command()
     async def balance(self, ctx):
@@ -123,7 +146,8 @@ class Economy(commands.Cog):
 
     @commands.command()
     async def daily(self, ctx):
-        player = await self.repo.get_player(ctx.author.id)
+        lo = await build_loadout(self.repo, ctx.author.id)
+        player = lo.player
         now = time.time()
         if now - player.last_daily < config.DAILY_COOLDOWN:
             remaining = int(config.DAILY_COOLDOWN - (now - player.last_daily))
@@ -134,8 +158,7 @@ class Economy(commands.Cog):
             return
 
         reward = int(
-            random.randint(config.DAILY_MIN, config.DAILY_MAX)
-            * combat.prestige_ram_multiplier(player.prestige)
+            random.randint(config.DAILY_MIN, config.DAILY_MAX) * lo.ram_multiplier
         )
         await self.repo.adjust_balance(ctx.author.id, reward, "daily")
         await self.repo.set_last_daily(ctx.author.id, int(now))
@@ -186,13 +209,15 @@ class Economy(commands.Cog):
 
     @commands.command()
     async def inventory(self, ctx):
-        inv = await self.repo.get_inventory(ctx.author.id)
+        inv = await self.repo.get_inventory_counts(ctx.author.id)
         if not inv:
             await ctx.send(f"🎒 {ctx.author.mention}'s inventory is empty. Go buy some gear!")
         else:
             await ctx.send(
                 f"🎒 **{ctx.author.name}'s Inventory:**\n"
-                + "\n".join(f"• {i}" for i in inv)
+                + "\n".join(
+                    f"• {code}" + (f" ×{qty}" if qty > 1 else "") for code, qty in inv
+                )
             )
 
     @commands.command()

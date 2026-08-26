@@ -10,6 +10,7 @@ from discord.ext import commands
 
 import config
 from core import combat
+from core.loadout import build_loadout, grant_pet_xp
 
 OUTCOME_STYLE = {
     "flawless": ("✨ FLAWLESS", discord.Color.gold()),
@@ -74,9 +75,7 @@ class DungeonCog(commands.Cog, name="Dungeon"):
     # ========================================================
     async def _show_list(self, ctx, player, remaining):
         dungeons = await self.repo.get_dungeons()
-        klass = await self.repo.get_class(player.class_id) if player.class_id else None
-        equipped = await self.repo.get_equipped_map(ctx.author.id)
-        stats = combat.compute_stats(player, klass, equipped.values())
+        stats = (await build_loadout(self.repo, ctx.author.id)).stats
 
         status = (
             f"⏳ Cooling down — **{human_duration(remaining)}** left"
@@ -127,14 +126,19 @@ class DungeonCog(commands.Cog, name="Dungeon"):
 
     # ========================================================
     async def _run(self, ctx, player, dungeon):
-        klass = await self.repo.get_class(player.class_id) if player.class_id else None
-        equipped = await self.repo.get_equipped_map(ctx.author.id)
-        stats = combat.compute_stats(player, klass, equipped.values())
+        lo = await build_loadout(self.repo, ctx.author.id)
+        klass, stats = lo.player_class, lo.stats
         loot = await self.repo.get_loot_table(dungeon.dungeon_id)
 
         result = combat.resolve_run(
             stats, dungeon, klass, loot, prestige=player.prestige
         )
+
+        # An active pet adds its own $RAM bonus on top of prestige. resolve_run
+        # already applied the prestige multiplier, so only the pet part is left.
+        pet_bonus = combat.pet_ram_multiplier(lo.pet)
+        if pet_bonus != 1.0:
+            result.ram_earned = int(result.ram_earned * pet_bonus)
 
         # Persist first, so the cooldown lands even if rendering fails.
         await self.repo.record_dungeon_run(
@@ -149,10 +153,14 @@ class DungeonCog(commands.Cog, name="Dungeon"):
             await self.repo.add_contribution(ctx.author.id, result.ram_earned)
 
         levelled, new_level, bonus = (False, player.level, 0)
+        pet_levelled, pet_after = False, None
         if result.xp_earned:
             levelled, new_level, bonus = await self.repo.add_xp(
                 ctx.author.id, result.xp_earned,
                 config.xp_for_level, config.LEVEL_UP_BONUS_PER_LEVEL,
+            )
+            pet_after, pet_levelled, _ = await grant_pet_xp(
+                self.repo, ctx.author.id, result.xp_earned
             )
 
         drop_line = await self._award_drop(ctx.author.id, result)
@@ -209,17 +217,35 @@ class DungeonCog(commands.Cog, name="Dungeon"):
                 f"⬆️ **LEVEL UP!** {ctx.author.mention} is now **Level {new_level}**! "
                 f"Bonus: +{bonus}GB $RAM 💾"
             )
+        if pet_levelled and pet_after is not None:
+            await ctx.send(
+                f"🐾 **{pet_after.display_name}** reached **Level {pet_after.level}**!"
+            )
 
     async def _award_drop(self, user_id, result):
-        """Give the drop, or convert a duplicate into $RAM."""
-        if not result.item_dropped:
+        """Give the drop. Stackable items stack, duplicate gear salvages."""
+        code = result.item_dropped
+        if not code:
             return None
 
-        gear = await self.repo.get_gear(result.item_dropped)
-        name = gear.display_name if gear else result.item_dropped
+        # Stackable items (eggs) have no gear_stats row, so they must be handled
+        # before the gear path -- otherwise a second egg would hit ON CONFLICT
+        # DO NOTHING and vanish without a trace.
+        if await self.repo.is_stackable(code):
+            await self.repo.add_item(user_id, code, 1, stackable=True)
+            item = await self.repo.get_shop_item(code)
+            name = item.display_name if item else code
+            held = await self.repo.get_item_quantity(user_id, code)
+            return (
+                f"🥚 **{name}** dropped! You now hold **{held}**. "
+                f"`!pet hatch` to open one."
+            )
+
+        gear = await self.repo.get_gear(code)
+        name = gear.display_name if gear else code
         rarity = config.RARITY_EMOJI.get(gear.rarity, "") if gear else ""
 
-        owned = result.item_dropped in await self.repo.get_inventory(user_id)
+        owned = code in await self.repo.get_inventory(user_id)
         if owned and gear:
             # Duplicate: auto-salvage rather than silently vanishing.
             await self.repo.adjust_balance(
@@ -230,9 +256,9 @@ class DungeonCog(commands.Cog, name="Dungeon"):
                 f"+**{gear.salvage_value}GB $RAM**"
             )
 
-        await self.repo.add_item(user_id, result.item_dropped)
+        await self.repo.add_item(user_id, code)
         stat_line = f"\n`{gear.stat_line()}`" if gear else ""
-        return f"{rarity} **{name}** dropped! `!equip {result.item_dropped}`{stat_line}"
+        return f"{rarity} **{name}** dropped! `!equip {code}`{stat_line}"
 
 
 async def setup(bot):

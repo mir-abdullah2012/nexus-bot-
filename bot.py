@@ -36,6 +36,7 @@ EXTENSIONS = (
     "cogs.dungeon",
     "cogs.clans",
     "cogs.duel",
+    "cogs.pets",
 )
 
 

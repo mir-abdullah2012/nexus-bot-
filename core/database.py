@@ -53,7 +53,13 @@ class Database:
 
         for version, name, statements in migrations.pending(current):
             for statement in statements:
-                await self._conn.execute(statement)
+                try:
+                    await self._conn.execute(statement)
+                except sqlite3.OperationalError as e:
+                    # ALTER TABLE has no IF NOT EXISTS; a duplicate column means
+                    # already applied, not broken.
+                    if not migrations.is_benign_ddl_error(e):
+                        raise
             for sql, rows in migrations.SEEDS.get(version, []):
                 await self._conn.executemany(sql, rows)
             await self._conn.execute(

@@ -35,6 +35,7 @@ class CombatStats:
     from_class: dict = field(default_factory=dict)
     from_gear: dict = field(default_factory=dict)
     from_level: dict = field(default_factory=dict)
+    from_pet: dict = field(default_factory=dict)
     prestige_multiplier: float = 1.0
 
 
@@ -58,11 +59,37 @@ def prestige_title(prestige: int) -> str:
     return config.PRESTIGE_TITLE_MAX
 
 
-def compute_stats(player, player_class, gear) -> CombatStats:
-    """Combine class base + equipped gear + level + prestige into one sheet.
+def pet_contribution(pet) -> dict:
+    """Stat block an active pet adds. Scales with the pet's own level.
+
+    Deliberately small: a maxed legendary lands around 15% of a geared player's
+    POWER, so a pet is a meaningful edge and never a replacement for gear.
+    """
+    zero = {"power": 0, "thermals": 0, "clock": 0, "bandwidth": 0}
+    if pet is None or getattr(pet, "species", None) is None:
+        return zero
+    mult = 1 + (max(1, pet.level) - 1) * config.PET_STAT_GROWTH
+    s = pet.species
+    return {
+        "power": int(s.base_power * mult),
+        "thermals": int(s.base_thermals * mult),
+        "clock": int(s.base_clock * mult),
+        "bandwidth": int(s.base_bandwidth * mult),
+    }
+
+
+def pet_ram_multiplier(pet) -> float:
+    """Active-pet $RAM bonus: +0.4% per pet level, so +10% at the level cap."""
+    if pet is None:
+        return 1.0
+    return 1.0 + max(0, pet.level) * config.PET_RAM_BONUS_PER_LEVEL
+
+
+def compute_stats(player, player_class, gear, pet=None) -> CombatStats:
+    """Combine class base + equipped gear + level + active pet + prestige.
 
     `gear` is any iterable of objects exposing power/thermals/clock/bandwidth.
-    `player_class` may be None -- an unclassed player just gets level+gear.
+    `player_class` and `pet` may both be None.
     """
     cls_stats = {
         "power": getattr(player_class, "base_power", 0) if player_class else 0,
@@ -85,10 +112,13 @@ def compute_stats(player, player_class, gear) -> CombatStats:
         "bandwidth": 0,
     }
 
+    pet_stats = pet_contribution(pet)
     mult = prestige_stat_multiplier(player.prestige)
 
     def total(key):
-        return int((cls_stats[key] + gear_stats[key] + level_stats[key]) * mult)
+        return int(
+            (cls_stats[key] + gear_stats[key] + level_stats[key] + pet_stats[key]) * mult
+        )
 
     power, thermals = total("power"), total("thermals")
     clock, bandwidth = total("clock"), total("bandwidth")
@@ -103,6 +133,7 @@ def compute_stats(player, player_class, gear) -> CombatStats:
         from_class=cls_stats,
         from_gear=gear_stats,
         from_level=level_stats,
+        from_pet=pet_stats,
         prestige_multiplier=mult,
     )
 

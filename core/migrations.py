@@ -362,6 +362,105 @@ _V3 = (
 )
 
 
+# ============================================================
+#  V4 -- PETS
+# ============================================================
+_V4 = (
+    """
+    CREATE TABLE IF NOT EXISTS pet_species (
+        species_id     TEXT PRIMARY KEY,
+        name           TEXT NOT NULL,
+        emoji          TEXT NOT NULL,
+        description    TEXT NOT NULL,
+        rarity         TEXT NOT NULL DEFAULT 'common',
+        base_power     INTEGER NOT NULL DEFAULT 0,
+        base_thermals  INTEGER NOT NULL DEFAULT 0,
+        base_clock     INTEGER NOT NULL DEFAULT 0,
+        base_bandwidth INTEGER NOT NULL DEFAULT 0,
+        hatch_weight   INTEGER NOT NULL DEFAULT 0,
+        enabled        INTEGER NOT NULL DEFAULT 1,
+        sort_order     INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+
+    # Owned instances. Releasing is a soft delete so hatch history survives, and
+    # players.pet_id (reserved since Phase 1) points at the active one.
+    """
+    CREATE TABLE IF NOT EXISTS pets (
+        pet_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id     INTEGER NOT NULL REFERENCES players(user_id) ON DELETE CASCADE,
+        species_id  TEXT    NOT NULL REFERENCES pet_species(species_id),
+        name        TEXT,
+        level       INTEGER NOT NULL DEFAULT 1,
+        xp          INTEGER NOT NULL DEFAULT 0,
+        hatched_at  INTEGER NOT NULL,
+        released_at INTEGER
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_pets_user ON pets(user_id, released_at)",
+
+    # inventory.quantity has existed since v1 but nothing ever incremented it,
+    # because add_item used ON CONFLICT DO NOTHING. Eggs need to stack, so this
+    # flag marks which items increment instead of being treated as one-of-a-kind.
+    # ALTER TABLE has no IF NOT EXISTS -- the runner tolerates a duplicate column.
+    "ALTER TABLE shop_items ADD COLUMN stackable INTEGER NOT NULL DEFAULT 0",
+)
+
+# Peripherals and mascots: classes are people, gear is components, so pets get
+# the thematic space nobody else is using.
+#
+# POWER is deliberately capped at 2 on every species. Duels are opposed rolls
+# and therefore hypersensitive to POWER -- an early build gave the legendary
+# +14 POWER, which won 79.5% of mirror matches and turned PvP into a hatch-luck
+# lottery. Legendaries express their value through THERMALS/CLOCK/BANDWIDTH
+# instead, which scale far more gently in PvP. See scripts/simulate_pets.py.
+PET_SPECIES_SEED = [
+    # id, name, emoji, rarity, P, T, C, B, hatch_weight, sort, description
+    ("cache_hamster", "Cache Hamster", "🐹", "common", 0, 1, 1, 3, 26, 1,
+     "Stuffs everything into its cheeks. Retrieval is instant, eviction is a mystery."),
+    ("fan_sprite", "Case Fan Sprite", "🌀", "common", 0, 3, 1, 0, 26, 2,
+     "Spins up the moment things get warm. Slightly whiny under load."),
+    ("optical_mouse", "Optical Mouse", "🐁", "uncommon", 1, 0, 3, 1, 18, 3,
+     "1000Hz polling rate. Refuses to work on glass."),
+    ("silicon_bug", "Silicon Bug", "🐛", "uncommon", 2, 0, 2, 0, 18, 4,
+     "Technically a feature. Hits considerably harder than documented."),
+    ("router_owl", "Router Owl", "🦉", "rare", 1, 1, 2, 4, 7, 5,
+     "Sees every packet. Judges you for the ones you drop."),
+    ("heatsink_tortoise", "Heatsink Tortoise", "🐢", "rare", 0, 6, 0, 0, 7, 6,
+     "Enormous thermal mass, zero urgency. Nothing gets through the shell."),
+    ("daemon", "Daemon", "👹", "epic", 2, 2, 2, 2, 3, 7,
+     "Runs in the background, never asks for anything, quietly does everything."),
+    ("thermal_dragon", "Thermal Dragon", "🐉", "legendary", 2, 5, 3, 2, 1, 8,
+     "Born in a case with no intake fans. Exhales at 94 degrees."),
+]
+
+EGG_SEED = [
+    # code, display_name, category, price, sort_order
+    ("EGG", "Mystery Egg", "egg", 3_000, 30),
+]
+
+# Eggs join the existing loot tables at a low weight -- roughly 5-9% of drops.
+EGG_LOOT_SEED = [
+    ("throttle", "EGG", 6),
+    ("render", "EGG", 7),
+    ("cryptomine", "EGG", 8),
+    ("bsod", "EGG", 9),
+]
+
+_PET_SPECIES_SQL = (
+    "INSERT OR IGNORE INTO pet_species "
+    "(species_id, name, emoji, rarity, base_power, base_thermals, base_clock, "
+    " base_bandwidth, hatch_weight, sort_order, description) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+_EGG_ITEM_SQL = (
+    "INSERT OR IGNORE INTO shop_items "
+    "(code, display_name, category, price, role_name, enabled, sort_order, stackable) "
+    "VALUES (?, ?, ?, ?, NULL, 1, ?, 1)"
+)
+
+
 # Seed the shop with exactly the Nexus 1.x catalogue and prices.
 # sort_order preserves the original dict ordering so !shop renders identically.
 SHOP_SEED = [
@@ -520,6 +619,7 @@ MIGRATIONS = [
     (1, "foundation", _V1),
     (2, "rpg_core", _V2),
     (3, "pvp_clans", _V3),
+    (4, "pets", _V4),
 ]
 
 # (version, sql, list_of_param_tuples) -- parameterised seed data per version.
@@ -538,6 +638,15 @@ SEEDS = {
         ]),
         (_DUNGEON_SQL, DUNGEON_SEED),
         (_LOOT_SQL, LOOT_SEED),
+    ],
+    4: [
+        (_EGG_ITEM_SQL, [(c, n, cat, p, o) for c, n, cat, p, o in EGG_SEED]),
+        (_PET_SPECIES_SQL, [
+            (sid, name, emoji, rarity, pw, th, ck, bw, weight, sort, desc)
+            for sid, name, emoji, rarity, pw, th, ck, bw, weight, sort, desc
+            in PET_SPECIES_SEED
+        ]),
+        (_LOOT_SQL, EGG_LOOT_SEED),
     ],
 }
 
@@ -558,6 +667,17 @@ def pending(current_version):
             yield version, name, statements
 
 
+def is_benign_ddl_error(exc) -> bool:
+    """True for a DDL failure that means 'already applied', not 'broken'.
+
+    CREATE ... IF NOT EXISTS covers most statements, but ALTER TABLE has no such
+    form. Without this, a database that already has the column would fail the
+    migration, never record the version, and retry forever on every boot.
+    """
+    message = str(exc).lower()
+    return "duplicate column name" in message
+
+
 def apply_sync(conn: sqlite3.Connection, verbose: bool = True) -> int:
     """Bring a plain sqlite3 connection up to LATEST_VERSION.
 
@@ -570,7 +690,11 @@ def apply_sync(conn: sqlite3.Connection, verbose: bool = True) -> int:
 
     for version, name, statements in pending(current):
         for statement in statements:
-            conn.execute(statement)
+            try:
+                conn.execute(statement)
+            except sqlite3.OperationalError as e:
+                if not is_benign_ddl_error(e):
+                    raise
         for sql, rows in SEEDS.get(version, []):
             conn.executemany(sql, rows)
         conn.execute(

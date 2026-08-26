@@ -13,6 +13,7 @@ from discord.ext import commands
 
 import config
 from core import combat
+from core.loadout import build_loadout
 
 
 class RPG(commands.Cog):
@@ -129,10 +130,8 @@ class RPG(commands.Cog):
     @commands.command(aliases=["gear"])
     async def build(self, ctx, member: discord.Member = None):
         member = member or ctx.author
-        player = await self.repo.get_player(member.id)
-        klass = await self.repo.get_class(player.class_id) if player.class_id else None
-        equipped = await self.repo.get_equipped_map(member.id)
-        stats = combat.compute_stats(player, klass, equipped.values())
+        lo = await build_loadout(self.repo, member.id)
+        player, klass, equipped, stats = lo.player, lo.player_class, lo.gear, lo.stats
 
         title = combat.prestige_title(player.prestige)
         header = f"🖥️ {member.name}'s Build"
@@ -157,6 +156,21 @@ class RPG(commands.Cog):
                 loadout.append(f"{label}: {rarity} **{item.display_name}** — `{item.stat_line()}`")
             else:
                 loadout.append(f"{label}: *empty*")
+        if lo.pet:
+            pet_stats = combat.pet_contribution(lo.pet)
+            bits = " · ".join(
+                f"{k} +{v}" for k, v in (
+                    ("PWR", pet_stats["power"]), ("THRM", pet_stats["thermals"]),
+                    ("CLK", pet_stats["clock"]), ("BW", pet_stats["bandwidth"]),
+                ) if v
+            ) or "no stats yet"
+            loadout.append(
+                f"🐾 Companion: {lo.pet.emoji} **{lo.pet.display_name}** "
+                f"(Lv {lo.pet.level}) — `{bits}`"
+            )
+        else:
+            loadout.append("🐾 Companion: *none* — `!pet`")
+
         embed.add_field(name="Loadout", value="\n".join(loadout), inline=False)
 
         embed.add_field(
@@ -177,6 +191,11 @@ class RPG(commands.Cog):
             f"{stats.from_gear['clock']}/{stats.from_gear['bandwidth']}`\n"
             f"level `{stats.from_level['power']}/{stats.from_level['thermals']}/0/0`"
         )
+        if lo.pet:
+            breakdown += (
+                f"\npet `{stats.from_pet['power']}/{stats.from_pet['thermals']}/"
+                f"{stats.from_pet['clock']}/{stats.from_pet['bandwidth']}`"
+            )
         if player.prestige:
             breakdown += f"\nprestige ×{stats.prestige_multiplier:.2f}"
         embed.add_field(name="Sources (P/T/C/B)", value=breakdown, inline=True)

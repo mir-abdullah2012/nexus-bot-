@@ -225,6 +225,99 @@ class GearItem:
 
 
 # ============================================================
+#  PHASE 4 -- PETS
+# ============================================================
+@dataclass
+class PetSpecies:
+    species_id: str
+    name: str
+    emoji: str
+    description: str
+    rarity: str = "common"
+    base_power: int = 0
+    base_thermals: int = 0
+    base_clock: int = 0
+    base_bandwidth: int = 0
+    hatch_weight: int = 0
+    sort_order: int = 0
+
+    @classmethod
+    def from_row(cls, row):
+        return cls(
+            species_id=row["species_id"],
+            name=row["name"],
+            emoji=row["emoji"],
+            description=row["description"],
+            rarity=row["rarity"],
+            base_power=row["base_power"],
+            base_thermals=row["base_thermals"],
+            base_clock=row["base_clock"],
+            base_bandwidth=row["base_bandwidth"],
+            hatch_weight=row["hatch_weight"],
+            sort_order=row["sort_order"],
+        )
+
+
+@dataclass
+class Pet:
+    """An owned pet instance. `species` is joined in by the repository."""
+
+    pet_id: int
+    user_id: int
+    species_id: str
+    name: str | None = None
+    level: int = 1
+    xp: int = 0
+    hatched_at: int = 0
+    released_at: int | None = None
+    species: PetSpecies | None = None
+
+    @classmethod
+    def from_row(cls, row):
+        keys = row.keys()
+        species = None
+        if "species_name" in keys and row["species_name"] is not None:
+            species = PetSpecies(
+                species_id=row["species_id"],
+                name=row["species_name"],
+                emoji=row["emoji"],
+                description=row["description"],
+                rarity=row["rarity"],
+                base_power=row["base_power"],
+                base_thermals=row["base_thermals"],
+                base_clock=row["base_clock"],
+                base_bandwidth=row["base_bandwidth"],
+                hatch_weight=row["hatch_weight"],
+                sort_order=row["sort_order"],
+            )
+        return cls(
+            pet_id=row["pet_id"],
+            user_id=row["user_id"],
+            species_id=row["species_id"],
+            name=row["name"],
+            level=row["level"],
+            xp=row["xp"],
+            hatched_at=row["hatched_at"],
+            released_at=row["released_at"],
+            species=species,
+        )
+
+    @property
+    def display_name(self) -> str:
+        return self.name or (self.species.name if self.species else self.species_id)
+
+    @property
+    def emoji(self) -> str:
+        return self.species.emoji if self.species else "🥚"
+
+    def label(self) -> str:
+        base = f"{self.emoji} **{self.display_name}**"
+        if self.name and self.species:
+            base += f" *({self.species.name})*"
+        return base
+
+
+# ============================================================
 #  PHASE 3 -- PVP + CLANS
 # ============================================================
 @dataclass

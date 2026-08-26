@@ -118,6 +118,31 @@ WEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
 WEATHER_TIMEOUT = 10
 
 # ============================================================
+#  PET HOUSES (Phase 6)
+# ============================================================
+# Houses and furniture are ordinary shop_items rows, so buying, listing and
+# reselling them all ride the Phase 5 marketplace with no new trading code.
+# "Pre-owned" is emergent: the shop is the only source of new houses, and
+# players undercut it by reselling the ones they have outgrown.
+HOME_SLOTS = ["house", "bed", "food"]
+HOME_SLOT_LABELS = {"house": "🏠 House", "bed": "🛏️ Bed", "food": "🍚 Food"}
+
+SLEEP_COOLDOWN = 20 * 3600     # 20h, not 24h: at 24h the window drifts an hour
+                               # later every day until it lands at 3am
+SLEEP_BASE_CHANCE = 0.10       # works with no house at all
+SLEEP_REST_PER_SLEEP = 0.005   # lifetime counter, +0.5% per sleep
+SLEEP_REST_CAP = 0.15          # ...capped, reached at 30 sleeps
+SLEEP_MAX_CHANCE = 0.60        # never a guaranteed grind: 2 in 5 still fail
+SLEEP_BONUS_CAP = 12           # lifetime +stat points a single pet can earn
+
+# THERMALS / CLOCK / BANDWIDTH only -- never POWER. Phase 4 measured duels as
+# hypersensitive to POWER (a +14 POWER pet won 79.5% of mirror matches), which
+# is why every species is capped at base POWER 2. A sleep system granting POWER
+# would quietly defeat that cap, so the pets table has no bonus_power column at
+# all: the bug cannot be written.
+SLEEP_BONUS_STATS = ("thermals", "clock", "bandwidth")
+
+# ============================================================
 #  MARKETPLACE (Phase 5)
 # ============================================================
 # The fees exist less for anti-abuse than for the economy. Every other $RAM flow
@@ -262,6 +287,9 @@ CATEGORY_LABELS = {
     "cooler": "❄️ Cooling",
     "ram": "💾 Memory",
     "egg": "🥚 Eggs",
+    "house": "🏠 Pet Houses",
+    "bed": "🛏️ Beds",
+    "food": "🍚 Pet Food",
 }
 RARITY_EMOJI = {
     "common": "⚪", "uncommon": "🟢", "rare": "🔵",

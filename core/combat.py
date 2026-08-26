@@ -70,12 +70,50 @@ def pet_contribution(pet) -> dict:
         return zero
     mult = 1 + (max(1, pet.level) - 1) * config.PET_STAT_GROWTH
     s = pet.species
+    # Sleep bonuses are FLAT -- added after the level multiplier, never scaled by
+    # it. Multiplying them would let a maxed pet compound its way past the +12
+    # lifetime cap. There is no power term: sleep cannot grant POWER.
     return {
         "power": int(s.base_power * mult),
-        "thermals": int(s.base_thermals * mult),
-        "clock": int(s.base_clock * mult),
-        "bandwidth": int(s.base_bandwidth * mult),
+        "thermals": int(s.base_thermals * mult) + getattr(pet, "bonus_thermals", 0),
+        "clock": int(s.base_clock * mult) + getattr(pet, "bonus_clock", 0),
+        "bandwidth": int(s.base_bandwidth * mult) + getattr(pet, "bonus_bandwidth", 0),
     }
+
+
+def sleep_chance(home: dict, sleep_count: int) -> float:
+    """Odds a single sleep grants a permanent +1.
+
+    `home` maps slot -> HomeItem. Works with an empty dict: a pet with no house
+    still sleeps at the base rate, because nothing here is a punishment.
+
+    The rest term is a LIFETIME counter that only ever rises. A streak that
+    reset on a missed day would be a penalty for inactivity in disguise --
+    skipping simply means you stop advancing.
+    """
+    chance = config.SLEEP_BASE_CHANCE
+    for item in home.values():
+        chance += item.sleep_bonus
+    chance += min(config.SLEEP_REST_CAP, sleep_count * config.SLEEP_REST_PER_SLEEP)
+    return min(config.SLEEP_MAX_CHANCE, chance)
+
+
+def pick_sleep_stat(species, rng):
+    """Choose which stat a successful sleep raises, weighted by the species'
+    leaning -- a Heatsink Tortoise trends THERMALS, a Router Owl BANDWIDTH."""
+    weights = []
+    for stat in config.SLEEP_BONUS_STATS:
+        weights.append(max(0, getattr(species, f"base_{stat}", 0)) if species else 0)
+    if sum(weights) <= 0:
+        weights = [1] * len(config.SLEEP_BONUS_STATS)
+
+    target = rng.uniform(0, sum(weights))
+    running = 0.0
+    for stat, weight in zip(config.SLEEP_BONUS_STATS, weights):
+        running += weight
+        if target <= running:
+            return stat
+    return config.SLEEP_BONUS_STATS[-1]
 
 
 def pet_ram_multiplier(pet) -> float:

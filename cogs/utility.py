@@ -185,7 +185,8 @@ class Utility(commands.Cog):
         embed.add_field(name="🐾 Pets", value=(
             "`buy EGG` — 3,000GB, or find one in a dungeon\n"
             "`!pet hatch` `!pet list` `!pet active <id>`\n"
-            "`!pet name <text>` `!pet species` `!pet release <id>`"
+            "`!pet name <text>` `!pet species` `!pet release <id>`\n"
+            "`!pet house` `!pet place <item>` `!pet sleep` — houses & furniture"
         ), inline=False)
         embed.add_field(name="🤺 PvP", value=(
             "`!duel @user [wager]` — challenge someone\n"

@@ -497,6 +497,84 @@ _V5 = (
 )
 
 
+# ============================================================
+#  V6 -- PET HOUSES
+# ============================================================
+_V6 = (
+    # Mirrors gear_stats: catalogue data keyed to a shop_items row, so houses
+    # and furniture are ordinary items that the marketplace can already trade.
+    """
+    CREATE TABLE IF NOT EXISTS home_items (
+        item_code   TEXT PRIMARY KEY REFERENCES shop_items(code) ON DELETE CASCADE,
+        slot        TEXT    NOT NULL,
+        tier        INTEGER NOT NULL DEFAULT 1,
+        sleep_bonus REAL    NOT NULL DEFAULT 0,
+        description TEXT    NOT NULL DEFAULT ''
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_home_items_slot ON home_items(slot)",
+
+    # Mirrors equipment: PK enforces one item per slot with no app-level check.
+    # Keyed by player, not by pet -- one home, whichever pet is active sleeps in
+    # it. Per-pet would mean buying ten houses with no gameplay behind the cost.
+    """
+    CREATE TABLE IF NOT EXISTS pet_home (
+        user_id   INTEGER NOT NULL REFERENCES players(user_id) ON DELETE CASCADE,
+        slot      TEXT    NOT NULL,
+        item_code TEXT    NOT NULL,
+        placed_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, slot)
+    )
+    """,
+
+    # Sleep state. Note there is deliberately NO bonus_power column -- see the
+    # note in config.SLEEP_BONUS_STATS. The absence is the enforcement.
+    "ALTER TABLE pets ADD COLUMN sleep_count     INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE pets ADD COLUMN last_slept_at   INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE pets ADD COLUMN bonus_thermals  INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE pets ADD COLUMN bonus_clock     INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE pets ADD COLUMN bonus_bandwidth INTEGER NOT NULL DEFAULT 0",
+)
+
+# Houses are PC cases. A pet living in a repurposed 5.25" bay is the correct joke.
+HOME_ITEM_SEED = [
+    # code, display_name, category, price, sort_order
+    ("DRIVEBAY", "Drive Bay", "house", 4_000, 40),
+    ("MINIITX", "Mini-ITX Case", "house", 12_000, 41),
+    ("FULLTOWER", "Full Tower", "house", 30_000, 42),
+    ("FOAM", "Anti-Static Foam", "bed", 1_500, 43),
+    ("THERMALPAD", "Thermal Pad", "bed", 5_000, 44),
+    ("LIQUIDBED", "Liquid Cooling Bed", "bed", 14_000, 45),
+    ("SILICA", "Silica Gel Packet", "food", 1_200, 46),
+    ("PASTE", "Thermal Paste", "food", 4_500, 47),
+    ("NITRO", "Liquid Nitrogen", "food", 13_000, 48),
+]
+
+HOME_STATS_SEED = [
+    # code, slot, tier, sleep_bonus, description
+    ("DRIVEBAY", "house", 1, 0.03, "A repurposed 5.25\" bay. Cosy, if you're small."),
+    ("MINIITX", "house", 2, 0.07, "Compact, tidy airflow, surprisingly premium."),
+    ("FULLTOWER", "house", 3, 0.12, "Nine fan mounts and a tempered glass side panel."),
+    ("FOAM", "bed", 1, 0.03, "The pink stuff motherboards ship on."),
+    ("THERMALPAD", "bed", 2, 0.07, "Squishy, conductive, weirdly comfortable."),
+    ("LIQUIDBED", "bed", 3, 0.12, "A closed loop that runs quiet all night."),
+    ("SILICA", "food", 1, 0.03, "DO NOT EAT. They eat it."),
+    ("PASTE", "food", 2, 0.07, "Pea-sized serving. Never spread it."),
+    ("NITRO", "food", 3, 0.12, "Served at -196C. Crunchy."),
+]
+
+_HOME_ITEM_SQL = (
+    "INSERT OR IGNORE INTO shop_items "
+    "(code, display_name, category, price, role_name, enabled, sort_order, stackable) "
+    "VALUES (?, ?, ?, ?, NULL, 1, ?, 0)"
+)
+
+_HOME_STATS_SQL = (
+    "INSERT OR IGNORE INTO home_items "
+    "(item_code, slot, tier, sleep_bonus, description) VALUES (?, ?, ?, ?, ?)"
+)
+
+
 # Seed the shop with exactly the Nexus 1.x catalogue and prices.
 # sort_order preserves the original dict ordering so !shop renders identically.
 SHOP_SEED = [
@@ -657,6 +735,7 @@ MIGRATIONS = [
     (3, "pvp_clans", _V3),
     (4, "pets", _V4),
     (5, "marketplace", _V5),
+    (6, "pet_houses", _V6),
 ]
 
 # (version, sql, list_of_param_tuples) -- parameterised seed data per version.
@@ -684,6 +763,11 @@ SEEDS = {
             in PET_SPECIES_SEED
         ]),
         (_LOOT_SQL, EGG_LOOT_SEED),
+    ],
+    6: [
+        # shop_items first so home_items' foreign key holds
+        (_HOME_ITEM_SQL, HOME_ITEM_SEED),
+        (_HOME_STATS_SQL, HOME_STATS_SEED),
     ],
 }
 

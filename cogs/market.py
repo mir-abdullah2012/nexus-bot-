@@ -160,6 +160,17 @@ class Market(commands.Cog):
             await ctx.send(f"❌ **{code}** is installed. `!unequip {slot}` first.")
             return
 
+        # Same rule for a house or furniture currently in the pet's home --
+        # otherwise selling it would leave the pet_home row pointing at an item
+        # the seller no longer owns.
+        if await self.repo.is_placed(ctx.author.id, code):
+            home_item = await self.repo.get_home_item(code)
+            slot = home_item.slot if home_item else "the slot"
+            await ctx.send(
+                f"❌ **{code}** is in your pet's home. `!pet unplace {slot}` first."
+            )
+            return
+
         fee = config.market_listing_fee(price)
         balance = await self.repo.get_balance(ctx.author.id)
         if balance < fee:

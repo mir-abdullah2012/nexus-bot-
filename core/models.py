@@ -312,6 +312,33 @@ class PetSpecies:
 
 
 @dataclass
+class HomeItem:
+    """A house, bed or food item. Mirrors GearItem: a shop_items row joined
+    with its home_items row."""
+
+    item_code: str
+    display_name: str
+    slot: str
+    tier: int = 1
+    sleep_bonus: float = 0.0
+    description: str = ""
+    price: int = 0
+
+    @classmethod
+    def from_row(cls, row):
+        keys = row.keys()
+        return cls(
+            item_code=row["item_code"],
+            display_name=row["display_name"] if "display_name" in keys else row["item_code"],
+            slot=row["slot"],
+            tier=row["tier"],
+            sleep_bonus=row["sleep_bonus"],
+            description=row["description"],
+            price=row["price"] if "price" in keys else 0,
+        )
+
+
+@dataclass
 class Pet:
     """An owned pet instance. `species` is joined in by the repository."""
 
@@ -324,6 +351,16 @@ class Pet:
     hatched_at: int = 0
     released_at: int | None = None
     species: PetSpecies | None = None
+    # Phase 6 sleep state. There is no bonus_power, by design.
+    sleep_count: int = 0
+    last_slept_at: int = 0
+    bonus_thermals: int = 0
+    bonus_clock: int = 0
+    bonus_bandwidth: int = 0
+
+    @property
+    def total_sleep_bonus(self) -> int:
+        return self.bonus_thermals + self.bonus_clock + self.bonus_bandwidth
 
     @classmethod
     def from_row(cls, row):
@@ -353,6 +390,12 @@ class Pet:
             hatched_at=row["hatched_at"],
             released_at=row["released_at"],
             species=species,
+            # guarded: a pre-v6 row will not have these columns
+            sleep_count=row["sleep_count"] if "sleep_count" in keys else 0,
+            last_slept_at=row["last_slept_at"] if "last_slept_at" in keys else 0,
+            bonus_thermals=row["bonus_thermals"] if "bonus_thermals" in keys else 0,
+            bonus_clock=row["bonus_clock"] if "bonus_clock" in keys else 0,
+            bonus_bandwidth=row["bonus_bandwidth"] if "bonus_bandwidth" in keys else 0,
         )
 
     @property

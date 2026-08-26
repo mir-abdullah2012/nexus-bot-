@@ -13,8 +13,8 @@ import json
 import time
 
 from core.models import (
-    Clan, ClanMember, DuelStats, Dungeon, GearItem, GuildConfig, Listing, Pet,
-    PetSpecies, Player, PlayerClass, Reminder, ShopItem, Warning,
+    Clan, ClanMember, DuelStats, Dungeon, GearItem, GuildConfig, HomeItem, Listing,
+    Pet, PetSpecies, Player, PlayerClass, Reminder, ShopItem, Warning,
 )
 
 
@@ -1074,11 +1074,24 @@ class Repository:
         )
         return "item", 1
 
-    async def _salvage_value(self, item_code: str) -> int:
-        return await self.db.fetchval(
-            "SELECT salvage_value FROM gear_stats WHERE item_code = ?",
-            (item_code,), default=0,
+    async def _salvage_value(self, item_code: str, fallback_rate: float = 0.25) -> int:
+        """What an item converts to when it cannot be returned to inventory.
+
+        Gear carries an explicit salvage_value. Anything else -- houses,
+        furniture -- falls back to a fraction of shop price. Without that
+        fallback a returning house that collided with one the seller already
+        owned would be destroyed for 0 GB: unreachable before Phase 6, because
+        every non-stackable listable item was gear.
+        """
+        value = await self.db.fetchval(
+            "SELECT salvage_value FROM gear_stats WHERE item_code = ?", (item_code,)
+        )
+        if value:
+            return value
+        price = await self.db.fetchval(
+            "SELECT price FROM shop_items WHERE code = ?", (item_code,), default=0
         ) or 0
+        return int(price * fallback_rate)
 
     async def count_active_listings(self, seller_id: int | None = None) -> int:
         if seller_id is None:
@@ -1277,6 +1290,114 @@ class Repository:
                 )
             results.append({"listing": listing, "outcome": outcome, "amount": amount})
         return results
+
+    # ========================================================
+    #  PHASE 6 -- PET HOUSES
+    # ========================================================
+    _HOME_SELECT = (
+        "SELECT h.*, s.display_name, s.price FROM home_items h "
+        "JOIN shop_items s ON s.code = h.item_code"
+    )
+
+    async def get_home_item(self, item_code: str):
+        row = await self.db.fetchone(
+            f"{self._HOME_SELECT} WHERE h.item_code = ?", (item_code,)
+        )
+        return HomeItem.from_row(row) if row else None
+
+    async def get_home_catalogue(self) -> list:
+        rows = await self.db.fetchall(
+            f"{self._HOME_SELECT} ORDER BY h.slot, h.tier"
+        )
+        return [HomeItem.from_row(r) for r in rows]
+
+    async def get_home(self, user_id: int) -> dict:
+        """slot -> HomeItem for everything this player has placed."""
+        rows = await self.db.fetchall(
+            f"{self._HOME_SELECT} "
+            "JOIN pet_home p ON p.item_code = h.item_code "
+            "WHERE p.user_id = ?",
+            (user_id,),
+        )
+        return {r["slot"]: HomeItem.from_row(r) for r in rows}
+
+    async def is_placed(self, user_id: int, item_code: str) -> bool:
+        found = await self.db.fetchval(
+            "SELECT 1 FROM pet_home WHERE user_id = ? AND item_code = ?",
+            (user_id, item_code),
+        )
+        return found is not None
+
+    async def place_home_item(self, user_id: int, item_code: str, slot: str):
+        """Install into a slot. Returns the code it displaced, if any.
+
+        Mirrors equip(): the item stays in inventory and this records placement,
+        so selling or salvaging a placed item is blocked rather than silently
+        pulling the rug out from under the pet.
+        """
+        await self.ensure_player(user_id)
+        previous = await self.db.fetchval(
+            "SELECT item_code FROM pet_home WHERE user_id = ? AND slot = ?",
+            (user_id, slot),
+        )
+        await self.db.execute(
+            "INSERT INTO pet_home (user_id, slot, item_code, placed_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(user_id, slot) DO UPDATE SET "
+            "  item_code = excluded.item_code, placed_at = excluded.placed_at",
+            (user_id, slot, item_code, _now()),
+        )
+        return previous
+
+    async def unplace_home_item(self, user_id: int, slot: str):
+        code = await self.db.fetchval(
+            "SELECT item_code FROM pet_home WHERE user_id = ? AND slot = ?",
+            (user_id, slot),
+        )
+        if code is None:
+            return None
+        await self.db.execute(
+            "DELETE FROM pet_home WHERE user_id = ? AND slot = ?", (user_id, slot)
+        )
+        return code
+
+    async def sleep_pet(self, pet, chance: float, rng, bonus_cap: int,
+                        pick_stat) -> dict:
+        """Roll one sleep for a pet.
+
+        Failing costs nothing but the cooldown, and sleep_count rises either
+        way, so every attempt improves the odds of the next one. Nothing here
+        can ever reduce a stat.
+        """
+        now = _now()
+        at_cap = pet.total_sleep_bonus >= bonus_cap
+        success = rng.random() < chance
+        stat = None
+
+        if success and not at_cap:
+            stat = pick_stat(pet.species, rng)
+            column = f"bonus_{stat}"
+            if stat not in ("thermals", "clock", "bandwidth"):
+                raise ValueError(f"sleep cannot grant {stat!r}")
+            await self.db.execute(
+                f"UPDATE pets SET {column} = {column} + 1, "
+                "sleep_count = sleep_count + 1, last_slept_at = ? WHERE pet_id = ?",
+                (now, pet.pet_id),
+            )
+            setattr(pet, column, getattr(pet, column) + 1)
+        else:
+            await self.db.execute(
+                "UPDATE pets SET sleep_count = sleep_count + 1, last_slept_at = ? "
+                "WHERE pet_id = ?",
+                (now, pet.pet_id),
+            )
+
+        pet.sleep_count += 1
+        pet.last_slept_at = now
+        return {"success": success, "stat": stat, "at_cap": at_cap,
+                "chance": chance, "sleep_count": pet.sleep_count}
+
+    async def sleep_cooldown_remaining(self, pet, cooldown: int) -> int:
+        return max(0, pet.last_slept_at + cooldown - _now())
 
     async def top_duelists(self, limit: int) -> list:
         rows = await self.db.fetchall(
